@@ -224,6 +224,16 @@ const turnInfo = document.querySelector('.turn-info');
 const turnInfoMessage = document.querySelector('.turn-info-message');
 const end = document.querySelector('#end');
 
+// Multiplayer UI elements
+const createGameBtn = document.querySelector('#create-game');
+const joinGameBtn = document.querySelector('#join-game');
+const startGameBtn = document.querySelector('#start-game');
+const gameIdDisplay = document.querySelector('#game-id-value');
+const playersListItems = document.querySelector('#players-list-items');
+const statusDisplay = document.querySelector('#status-value');
+const muteToggle = document.querySelector('#mute-toggle');
+const volumeSlider = document.querySelector('#volume-slider');
+
 
 //Create Game Object
 
@@ -240,6 +250,13 @@ Gamestate.gameOver = false;
 Gamestate.prevCountry = null; //Store previously selected country
 Gamestate.prevTarget = null; //Store previously selected target;
 
+// Multiplayer properties
+Gamestate.websocket = null;
+Gamestate.gameId = null;
+Gamestate.playerId = null;
+Gamestate.isMultiplayer = false;
+Gamestate.currentPlayerId = null;
+
 //Game Setup
 
 Gamestate.init = function(){
@@ -250,6 +267,24 @@ Gamestate.init = function(){
     map.addEventListener('mousedown', this.handleClick.bind(this)); 
     end.addEventListener('click', this.handleEndTurn.bind(this));
     playAgain.addEventListener('click', this.restart.bind(this));
+    
+    // Multiplayer event listeners
+    createGameBtn.addEventListener('click', this.createGame.bind(this));
+    joinGameBtn.addEventListener('click', this.joinGame.bind(this));
+    startGameBtn.addEventListener('click', this.startMultiplayerGame.bind(this));
+    
+    // Audio controls
+    muteToggle.addEventListener('click', this.toggleMute.bind(this));
+    volumeSlider.addEventListener('input', this.adjustVolume.bind(this));
+    
+    // Add click sounds to all buttons
+    document.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (window.audioSystem) {
+                window.audioSystem.playClickSound();
+            }
+        });
+    });
 }
 
 Gamestate.start = function(){
@@ -361,10 +396,19 @@ Gamestate.handleEndTurn = function(){
     if(this.aiTurn){
         return;
     }
-    this.aiTurn = true;
-    end.style.pointerEvents = "none";
-    map.style.pointerEvents = "none";
-    this.aiMove();
+    
+    if (this.isMultiplayer && this.websocket) {
+        // Send end turn to server
+        this.websocket.send(JSON.stringify({
+            type: 'end_turn'
+        }));
+    } else {
+        // Single player mode
+        this.aiTurn = true;
+        end.style.pointerEvents = "none";
+        map.style.pointerEvents = "none";
+        this.aiMove();
+    }
 }
 
 //Bonus Handlers
@@ -407,21 +451,39 @@ Gamestate.addArmy = function(e){
     this.countries.forEach(country => {
         //Check if Target is in country array and player has enough in reserve and player owns territory
         if(e.target.id === country.name && this.player.reserve > 0 && country.owner === this.player.name){
-            if(e.shiftKey){
-                country.army += this.player.reserve;     
-                this.player.reserve = 0;
-            }
-            else{
-                country.army += 1;
-                this.player.reserve -= 1;               
-            }         
-            reserveDisplay.innerHTML = this.player.reserve;
-            e.target.nextElementSibling.textContent = country.army;
-            //Once reserve is empty, battle stage can start
-            if(this.player.reserve === 0){
-                this.stage = "Battle";
-                turnInfo.textContent = this.stage;
-                turnInfoMessage.textContent = "Choose a country to attack from then a target";
+            const amount = e.shiftKey ? this.player.reserve : 1;
+            
+            if (this.isMultiplayer && this.websocket) {
+                // Send army placement to server
+                this.websocket.send(JSON.stringify({
+                    type: 'place_army',
+                    country: country.name,
+                    amount: amount
+                }));
+            } else {
+                // Single player mode
+                if(e.shiftKey){
+                    country.army += this.player.reserve;     
+                    this.player.reserve = 0;
+                }
+                else{
+                    country.army += 1;
+                    this.player.reserve -= 1;               
+                }         
+                reserveDisplay.innerHTML = this.player.reserve;
+                e.target.nextElementSibling.textContent = country.army;
+                
+                // Play sound effect
+                if (window.audioSystem) {
+                    window.audioSystem.playPlacementSound();
+                }
+                
+                //Once reserve is empty, battle stage can start
+                if(this.player.reserve === 0){
+                    this.stage = "Battle";
+                    turnInfo.textContent = this.stage;
+                    turnInfoMessage.textContent = "Choose a country to attack from then a target";
+                }
             }
         }
     })   
@@ -441,7 +503,17 @@ Gamestate.attack = function(e){
                 if(this.prevCountry.name !== country.name && this.prevCountry.owner !== country.owner && this.prevCountry.owner === this.player.name){
                     this.prevCountry.neighbours.forEach(neighbour => {               
                       if(neighbour === country.name && neighbour.owner !== country.name && this.prevCountry.army > 0){       
-                        return this.battle(this.prevCountry, country, this.player, 0);            
+                        if (this.isMultiplayer && this.websocket) {
+                            // Send attack to server
+                            this.websocket.send(JSON.stringify({
+                                type: 'attack',
+                                from: this.prevCountry.name,
+                                to: country.name
+                            }));
+                        } else {
+                            // Single player mode
+                            return this.battle(this.prevCountry, country, this.player, 0);
+                        }
                       }                
                      })
                  }      
@@ -602,11 +674,20 @@ Gamestate.battle = function(country, opponent, player, i){
         }
     })
     
+    // Play attack sound
+    if (window.audioSystem) {
+        window.audioSystem.playAttackSound();
+    }
+    
     //Battle Logic
     while(opponent.army >= 0){
         if(country.army === 0){
             attacker.nextElementSibling.textContent = 0;
             defender.nextElementSibling.textContent = opponent.army;
+            // Play defeat sound
+            if (window.audioSystem) {
+                window.audioSystem.playDefeatSound();
+            }
             return;
         }
         if(Math.random() > Math.random()){
@@ -619,6 +700,10 @@ Gamestate.battle = function(country, opponent, player, i){
     
     //Handle if Attacker Wins
     if(opponent.army <= 0 ){
+        // Play victory sound
+        if (window.audioSystem) {
+            window.audioSystem.playVictorySound();
+        }
         //Remove area from defenders areas array
         this.players.forEach(player => {
             if(player.name === opponent.owner){
@@ -676,6 +761,12 @@ Gamestate.battle = function(country, opponent, player, i){
                     bonusModalText.textContent = continent.name;
                     bonusModalText.style.color = player.color;
                     bonusModalAmount.textContent = continent.bonus;
+                    
+                    // Play bonus sound
+                    if (window.audioSystem) {
+                        window.audioSystem.playBonusSound();
+                    }
+                    
                      setTimeout(() => {
                          bonusModal.style.display = "none";
                      }, 2000);
@@ -690,6 +781,233 @@ Gamestate.battle = function(country, opponent, player, i){
         this.win(player);
     }    
 }
+
+// Multiplayer WebSocket functionality
+Gamestate.createGame = async function() {
+    try {
+        const response = await fetch('/api/games', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ max_players: 6 })
+        });
+        const data = await response.json();
+        this.gameId = data.game_id;
+        gameIdDisplay.textContent = this.gameId;
+        this.connectWebSocket();
+        if (window.audioSystem) {
+            window.audioSystem.playBonusSound();
+        }
+    } catch (error) {
+        console.error('Failed to create game:', error);
+        if (window.audioSystem) {
+            window.audioSystem.playErrorSound();
+        }
+    }
+};
+
+Gamestate.joinGame = function() {
+    const gameId = prompt('Enter Game ID:');
+    if (gameId) {
+        this.gameId = gameId;
+        gameIdDisplay.textContent = this.gameId;
+        this.connectWebSocket();
+    }
+};
+
+Gamestate.connectWebSocket = function() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/${this.gameId}`;
+    
+    this.websocket = new WebSocket(wsUrl);
+    this.isMultiplayer = true;
+    
+    this.websocket.onopen = () => {
+        console.log('Connected to game server');
+        statusDisplay.textContent = 'Connected';
+        statusDisplay.style.color = 'green';
+        
+        // Join the game
+        this.websocket.send(JSON.stringify({
+            type: 'join_game',
+            name: chosenLeader.value || 'Player',
+            country: chosenCountry.value || 'Unknown'
+        }));
+    };
+    
+    this.websocket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        this.handleWebSocketMessage(message);
+    };
+    
+    this.websocket.onclose = () => {
+        console.log('Disconnected from game server');
+        statusDisplay.textContent = 'Disconnected';
+        statusDisplay.style.color = 'red';
+        this.isMultiplayer = false;
+    };
+    
+    this.websocket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        if (window.audioSystem) {
+            window.audioSystem.playErrorSound();
+        }
+    };
+};
+
+Gamestate.handleWebSocketMessage = function(message) {
+    switch (message.type) {
+        case 'game_joined':
+            console.log('Joined game successfully');
+            this.updatePlayersDisplay(message.game.players);
+            if (window.audioSystem) {
+                window.audioSystem.playVictorySound();
+            }
+            break;
+            
+        case 'player_joined':
+            console.log('New player joined:', message.player.name);
+            break;
+            
+        case 'game_started':
+            console.log('Game started');
+            this.startFromServerData(message.game);
+            if (window.audioSystem) {
+                window.audioSystem.playTurnChangeSound();
+            }
+            break;
+            
+        case 'army_placed':
+            this.updateGameState(message.game);
+            if (window.audioSystem) {
+                window.audioSystem.playPlacementSound();
+            }
+            break;
+            
+        case 'attack_result':
+            this.handleAttackResult(message.result);
+            this.updateGameState(message.game);
+            break;
+            
+        case 'turn_ended':
+            this.updateGameState(message.game);
+            if (window.audioSystem) {
+                window.audioSystem.playTurnChangeSound();
+            }
+            break;
+            
+        case 'error':
+            console.error('Server error:', message.message);
+            if (window.audioSystem) {
+                window.audioSystem.playErrorSound();
+            }
+            break;
+    }
+};
+
+Gamestate.startMultiplayerGame = function() {
+    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+        this.websocket.send(JSON.stringify({
+            type: 'start_game'
+        }));
+    }
+};
+
+Gamestate.startFromServerData = function(gameData) {
+    // Hide modal and setup multiplayer game
+    modal.style.display = "none";
+    playerPanel.style.display = "flex";
+    infoPanel.style.display = "block";
+    
+    this.countries = gameData.countries;
+    this.currentPlayerId = gameData.current_player_id;
+    this.stage = gameData.stage;
+    this.turn = gameData.turn;
+    
+    // Update display
+    this.updateGameFromServer(gameData);
+    this.updateInfo();
+};
+
+Gamestate.updateGameState = function(gameData) {
+    this.countries = gameData.countries;
+    this.currentPlayerId = gameData.current_player_id;
+    this.stage = gameData.stage;
+    this.turn = gameData.turn;
+    this.updateGameFromServer(gameData);
+    this.updateInfo();
+};
+
+Gamestate.updateGameFromServer = function(gameData) {
+    // Update map display
+    this.countries.forEach(country => {
+        const area = document.getElementById(country.name);
+        if (area) {
+            area.style.fill = country.color;
+            area.nextElementSibling.textContent = country.army;
+        }
+    });
+    
+    // Update player info
+    const currentPlayer = Object.values(gameData.players).find(p => p.id === this.currentPlayerId);
+    if (currentPlayer) {
+        playerName.textContent = currentPlayer.name;
+        playerCountry.textContent = currentPlayer.country;
+        reserveDisplay.innerHTML = currentPlayer.reserve;
+    }
+    
+    this.updatePlayersDisplay(gameData.players);
+};
+
+Gamestate.updatePlayersDisplay = function(players) {
+    playersListItems.innerHTML = '';
+    Object.values(players).forEach(player => {
+        const li = document.createElement('li');
+        li.textContent = `${player.name} (${player.country})`;
+        li.style.color = player.color;
+        if (player.id === this.currentPlayerId) {
+            li.style.fontWeight = 'bold';
+            li.textContent += ' - Current Turn';
+        }
+        playersListItems.appendChild(li);
+    });
+};
+
+Gamestate.handleAttackResult = function(result) {
+    if (result.success) {
+        if (result.winner === 'attacker') {
+            if (window.audioSystem) {
+                window.audioSystem.playVictorySound();
+            }
+        } else {
+            if (window.audioSystem) {
+                window.audioSystem.playDefeatSound();
+            }
+        }
+    } else {
+        if (window.audioSystem) {
+            window.audioSystem.playErrorSound();
+        }
+    }
+    
+    // Show message
+    turnInfoMessage.textContent = result.message;
+};
+
+// Audio control methods
+Gamestate.toggleMute = function() {
+    if (window.audioSystem) {
+        const isMuted = muteToggle.textContent.includes('🔇');
+        window.audioSystem.setMute(!isMuted);
+        muteToggle.textContent = isMuted ? '🔊 Mute' : '🔇 Unmute';
+    }
+};
+
+Gamestate.adjustVolume = function() {
+    if (window.audioSystem) {
+        const volume = volumeSlider.value / 100;
+        window.audioSystem.setMasterVolume(volume);
+    }
+};
 
 //Initialize Game
 Gamestate.init();

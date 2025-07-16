@@ -4,7 +4,8 @@
     <meta charset="utf-8">
     <link rel="stylesheet" href="dist/css/main.css">
     <link href="https://fonts.googleapis.com/css?family=Alfa+Slab+One" rel="stylesheet">
-    <title>Risk</title>
+    <title>Risk - Multiplayer</title>
+    <script src="audio.js"></script>
 </head>
 <body>
 <div class="container">
@@ -35,7 +36,22 @@
         <div class="turn-info-message"></div>
 
         <div class="turn"></div>
+        <div class="multiplayer-info">
+            <div id="game-id" class="game-id">Game ID: <span id="game-id-value">-</span></div>
+            <div id="players-list" class="players-list">
+                <h3>Players:</h3>
+                <ul id="players-list-items"></ul>
+            </div>
+            <div id="connection-status" class="connection-status">Status: <span id="status-value">Disconnected</span></div>
+        </div>
+        <div class="audio-controls">
+            <button id="mute-toggle">🔊 Mute</button>
+            <input type="range" id="volume-slider" min="0" max="100" value="30">
+        </div>
         <div class="tip">Hold shift to deploy all troops</div>
+        <button id="create-game">Create Game</button>
+        <button id="join-game">Join Game</button>
+        <button id="start-game">Start Game</button>
         <button id="end">End turn</button>
     </div>
 <div class="map">

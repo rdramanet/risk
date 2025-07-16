@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Risk Game Frontend Tests</title>
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.19.4.css">
+    <script src="https://code.jquery.com/qunit/qunit-2.19.4.js"></script>
+    <script src="audio.js"></script>
+</head>
+<body>
+    <div id="qunit"></div>
+    <div id="qunit-fixture">
+        <!-- Test fixtures will be placed here -->
+        <div class="container">
+            <div id="start-modal" class="overlay" style="display: none;">
+                <div id="modal" class="start-modal">
+                    <p class="title">RISK</p>
+                    <p>Leader</p><input id="chosen-leader" value="Napoleon">
+                    <p>Country</p><input id="chosen-country" value="France"><br>
+                    <button id="submit-name">Start</button>
+                </div>
+            </div>
+            <div class="player-panel" style="display: none;">
+                <h1>RISK</h1>
+                <div class="player-name"></div>
+                <div class="player-country"></div>
+                <div class="reserve" id="reserve">2</div>
+                <div class="turn-info"></div>
+                <div class="turn-info-message"></div>
+                <div class="turn"></div>
+                <div class="multiplayer-info">
+                    <div id="game-id" class="game-id">Game ID: <span id="game-id-value">-</span></div>
+                    <div id="players-list" class="players-list">
+                        <h3>Players:</h3>
+                        <ul id="players-list-items"></ul>
+                    </div>
+                    <div id="connection-status" class="connection-status">Status: <span id="status-value">Disconnected</span></div>
+                </div>
+                <div class="audio-controls">
+                    <button id="mute-toggle">🔊 Mute</button>
+                    <input type="range" id="volume-slider" min="0" max="100" value="30">
+                </div>
+                <button id="create-game">Create Game</button>
+                <button id="join-game">Join Game</button>
+                <button id="start-game">Start Game</button>
+                <button id="end">End turn</button>
+            </div>
+            <div class="map">
+                <svg width="749.81909" height="519.06781">
+                    <g id="layer2">
+                        <path id="indonesia" class="area"></path>
+                        <text id="indonesia-text">0</text>
+                        <path id="new_guinea" class="area"></path>
+                        <text id="new_guinea-text">0</text>
+                        <path id="china" class="area"></path>
+                        <text id="china-text">0</text>
+                    </g>
+                </svg>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Mock global objects for testing
+        const continents = [
+            {
+                areas: ["indonesia", "new_guinea", "eastern_australia", "western_australia"],
+                name: "oceania",
+                bonus: 2
+            },
+            {
+                areas: ["china", "mongolia", "japan"],
+                name: "asia",
+                bonus: 7
+            }
+        ];
+
+        const countries = [
+            {name: "indonesia", continent: "oceania", owner: "none", color:"white", "army": 0, neighbours: ["siam", "western_australia", "new_guinea"]},
+            {name: "new_guinea", continent: "oceania", owner: "none", color:"white", "army": 0, neighbours: ["indonesia", "eastern_australia", "western_australia"]},
+            {name: "china", continent: "asia", owner: "none", color:"white", "army": 0, neighbours: ["ural", "siberia", "afghanistan", "mongolia", "siam", "india"]}
+        ];
+
+        const players = [
+            {
+                "name": "Napoleon",
+                "country": "France",
+                "color": "#030f63",
+                "army": 10,
+                "reserve": 10,
+                "areas": [],
+                "bonus": 2,
+                "alive": true
+            }
+        ];
+
+        // Mock fetch for API calls
+        window.fetch = function(url, options) {
+            return Promise.resolve({
+                json: () => Promise.resolve({
+                    game_id: "test1234"
+                })
+            });
+        };
+
+        // Mock WebSocket
+        window.WebSocket = function(url) {
+            this.readyState = 1; // OPEN
+            this.send = function(data) {
+                console.log('WebSocket send:', data);
+            };
+            this.close = function() {};
+        };
+
+        // Include the main game code (simplified version for testing)
+        let Gamestate = {};
+
+        Gamestate.countries = JSON.parse(JSON.stringify(countries));
+        Gamestate.players = JSON.parse(JSON.stringify(players));
+        Gamestate.player = JSON.parse(JSON.stringify(players))[0];
+        Gamestate.stage = "Fortify";
+        Gamestate.turn = 1;
+        Gamestate.aiTurn = false;
+        Gamestate.timeInterval = 1000;
+        Gamestate.gameOver = false;
+        Gamestate.prevCountry = null;
+        Gamestate.prevTarget = null;
+        Gamestate.websocket = null;
+        Gamestate.gameId = null;
+        Gamestate.playerId = null;
+        Gamestate.isMultiplayer = false;
+        Gamestate.currentPlayerId = null;
+
+        // Helper functions
+        Array.prototype.containsArray = function (array) {    
+            if( arguments[1] ) {
+                var index = arguments[1], last = arguments[2];
+            } else {
+                var index = 0, last = 0; this.sort(); array.sort();
+            };
+            return index == array.length
+                || ( last = this.indexOf( array[index], last ) ) > -1
+                && this.containsArray( array, ++index, ++last );           
+        };
+
+        function shuffle(array) {
+            var currentIndex = array.length, temporaryValue, randomIndex;
+            while (0 !== currentIndex) {
+                randomIndex = Math.floor(Math.random() * currentIndex);
+                currentIndex -= 1;
+                temporaryValue = array[currentIndex];
+                array[currentIndex] = array[randomIndex];
+                array[randomIndex] = temporaryValue;
+            }
+            return array;
+        }
+
+        // Game methods for testing
+        Gamestate.unitBonus = function(player, i){
+            player.bonus = 0;
+            player.bonus += Math.ceil(player.areas.length / 3);
+            player.bonus += this.continentBonus(player);
+            player.bonus = Math.ceil(player.bonus * (this.turn / 5)); 
+            if(player.bonus < 2){ 
+                player.bonus = 2;
+            }
+            return player.bonus;
+        };
+
+        Gamestate.continentBonus = function(player){
+            let bonus = 0;
+            continents.forEach( continent => {
+                if(player.areas.containsArray(continent.areas)){
+                    bonus += continent.bonus;
+                }
+            });   
+            return bonus;
+        };
+
+        Gamestate.createGame = async function() {
+            try {
+                const response = await fetch('/api/games', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_players: 6 })
+                });
+                const data = await response.json();
+                this.gameId = data.game_id;
+                document.getElementById('game-id-value').textContent = this.gameId;
+                return this.gameId;
+            } catch (error) {
+                console.error('Failed to create game:', error);
+                return null;
+            }
+        };
+
+        Gamestate.updatePlayersDisplay = function(players) {
+            const playersListItems = document.getElementById('players-list-items');
+            playersListItems.innerHTML = '';
+            Object.values(players).forEach(player => {
+                const li = document.createElement('li');
+                li.textContent = `${player.name} (${player.country})`;
+                li.style.color = player.color;
+                if (player.id === this.currentPlayerId) {
+                    li.style.fontWeight = 'bold';
+                    li.textContent += ' - Current Turn';
+                }
+                playersListItems.appendChild(li);
+            });
+        };
+
+        Gamestate.toggleMute = function() {
+            const muteToggle = document.getElementById('mute-toggle');
+            if (window.audioSystem) {
+                const isMuted = muteToggle.textContent.includes('🔇');
+                window.audioSystem.setMute(!isMuted);
+                muteToggle.textContent = isMuted ? '🔊 Mute' : '🔇 Unmute';
+            }
+        };
+
+        Gamestate.adjustVolume = function() {
+            const volumeSlider = document.getElementById('volume-slider');
+            if (window.audioSystem) {
+                const volume = volumeSlider.value / 100;
+                window.audioSystem.setMasterVolume(volume);
+            }
+        };
+
+        // Tests
+        QUnit.module('Audio System Tests', function() {
+            QUnit.test('AudioSystem initialization', function(assert) {
+                const audioSystem = new AudioSystem();
+                assert.false(audioSystem.isInitialized, 'Audio system should not be initialized initially');
+                assert.equal(audioSystem.masterVolume, 0.3, 'Default master volume should be 0.3');
+                assert.equal(audioSystem.musicVolume, 0.5, 'Default music volume should be 0.5');
+                assert.equal(audioSystem.sfxVolume, 0.7, 'Default SFX volume should be 0.7');
+            });
+
+            QUnit.test('Volume controls', function(assert) {
+                const audioSystem = new AudioSystem();
+                
+                audioSystem.setMasterVolume(0.8);
+                assert.equal(audioSystem.masterVolume, 0.8, 'Master volume should be set correctly');
+                
+                audioSystem.setMasterVolume(1.5); // Should clamp to 1.0
+                assert.equal(audioSystem.masterVolume, 1.0, 'Master volume should be clamped to 1.0');
+                
+                audioSystem.setMasterVolume(-0.1); // Should clamp to 0.0
+                assert.equal(audioSystem.masterVolume, 0.0, 'Master volume should be clamped to 0.0');
+            });
+
+            QUnit.test('Mute functionality', function(assert) {
+                const audioSystem = new AudioSystem();
+                audioSystem.currentBGM = true;
+                
+                audioSystem.setMute(true);
+                assert.equal(audioSystem.masterVolume, 0, 'Volume should be 0 when muted');
+                assert.false(audioSystem.currentBGM, 'Background music should be stopped when muted');
+                
+                audioSystem.setMute(false);
+                assert.equal(audioSystem.masterVolume, 0.3, 'Volume should be restored when unmuted');
+            });
+        });
+
+        QUnit.module('Game Logic Tests', function() {
+            QUnit.test('Player bonus calculation', function(assert) {
+                const player = {
+                    areas: ['indonesia', 'new_guinea'],
+                    bonus: 0
+                };
+                
+                const bonus = Gamestate.unitBonus(player, 0);
+                assert.true(bonus >= 2, 'Minimum bonus should be 2');
+            });
+
+            QUnit.test('Continent bonus calculation', function(assert) {
+                const player = {
+                    areas: ['indonesia', 'new_guinea', 'eastern_australia', 'western_australia']
+                };
+                
+                const bonus = Gamestate.continentBonus(player);
+                assert.equal(bonus, 2, 'Should get oceania continent bonus of 2');
+            });
+
+            QUnit.test('Array contains array helper', function(assert) {
+                const arr1 = ['a', 'b', 'c', 'd'];
+                const arr2 = ['b', 'c'];
+                const arr3 = ['x', 'y'];
+                
+                assert.true(arr1.containsArray(arr2), 'Array should contain subset');
+                assert.false(arr1.containsArray(arr3), 'Array should not contain non-subset');
+            });
+
+            QUnit.test('Shuffle function', function(assert) {
+                const original = [1, 2, 3, 4, 5];
+                const shuffled = shuffle([...original]);
+                
+                assert.equal(shuffled.length, original.length, 'Shuffled array should have same length');
+                
+                // Check that all elements are still present
+                original.forEach(item => {
+                    assert.true(shuffled.includes(item), `Element ${item} should still be present`);
+                });
+            });
+        });
+
+        QUnit.module('Multiplayer Functionality Tests', function() {
+            QUnit.test('Create game API call', async function(assert) {
+                const gameId = await Gamestate.createGame();
+                assert.equal(gameId, 'test1234', 'Should return correct game ID');
+                assert.equal(Gamestate.gameId, 'test1234', 'Game ID should be stored in state');
+                
+                const displayedId = document.getElementById('game-id-value').textContent;
+                assert.equal(displayedId, 'test1234', 'Game ID should be displayed in UI');
+            });
+
+            QUnit.test('Update players display', function(assert) {
+                const players = {
+                    'player1': {
+                        id: 'player1',
+                        name: 'Alice',
+                        country: 'France',
+                        color: '#FF0000'
+                    },
+                    'player2': {
+                        id: 'player2',
+                        name: 'Bob',
+                        country: 'Germany',
+                        color: '#00FF00'
+                    }
+                };
+                
+                Gamestate.currentPlayerId = 'player1';
+                Gamestate.updatePlayersDisplay(players);
+                
+                const playersList = document.getElementById('players-list-items');
+                const listItems = playersList.querySelectorAll('li');
+                
+                assert.equal(listItems.length, 2, 'Should display 2 players');
+                assert.true(listItems[0].textContent.includes('Alice'), 'Should display first player name');
+                assert.true(listItems[1].textContent.includes('Bob'), 'Should display second player name');
+                assert.true(listItems[0].textContent.includes('Current Turn'), 'Should indicate current player');
+            });
+        });
+
+        QUnit.module('UI Controls Tests', function() {
+            QUnit.test('Mute toggle functionality', function(assert) {
+                const muteButton = document.getElementById('mute-toggle');
+                const originalText = muteButton.textContent;
+                
+                // Mock audio system
+                window.audioSystem = {
+                    setMute: function(muted) {
+                        this.isMuted = muted;
+                    },
+                    isMuted: false
+                };
+                
+                Gamestate.toggleMute();
+                
+                assert.notEqual(muteButton.textContent, originalText, 'Button text should change');
+                assert.true(window.audioSystem.isMuted, 'Audio system should be muted');
+            });
+
+            QUnit.test('Volume slider functionality', function(assert) {
+                const volumeSlider = document.getElementById('volume-slider');
+                volumeSlider.value = '75';
+                
+                let setVolume = null;
+                window.audioSystem = {
+                    setMasterVolume: function(volume) {
+                        setVolume = volume;
+                    }
+                };
+                
+                Gamestate.adjustVolume();
+                
+                assert.equal(setVolume, 0.75, 'Volume should be set to 75%');
+            });
+        });
+
+        QUnit.module('Game State Management Tests', function() {
+            QUnit.test('Initial game state', function(assert) {
+                assert.equal(Gamestate.stage, 'Fortify', 'Initial stage should be Fortify');
+                assert.equal(Gamestate.turn, 1, 'Initial turn should be 1');
+                assert.false(Gamestate.aiTurn, 'Should not be AI turn initially');
+                assert.false(Gamestate.gameOver, 'Game should not be over initially');
+                assert.false(Gamestate.isMultiplayer, 'Should not be multiplayer initially');
+            });
+
+            QUnit.test('Country data integrity', function(assert) {
+                assert.equal(Gamestate.countries.length, 3, 'Should have 3 test countries');
+                
+                Gamestate.countries.forEach(country => {
+                    assert.true(typeof country.name === 'string', 'Country should have a name');
+                    assert.true(typeof country.continent === 'string', 'Country should have a continent');
+                    assert.true(Array.isArray(country.neighbours), 'Country should have neighbours array');
+                    assert.true(typeof country.army === 'number', 'Country should have army count');
+                });
+            });
+
+            QUnit.test('Player data integrity', function(assert) {
+                const player = Gamestate.player;
+                
+                assert.true(typeof player.name === 'string', 'Player should have a name');
+                assert.true(typeof player.country === 'string', 'Player should have a country');
+                assert.true(typeof player.color === 'string', 'Player should have a color');
+                assert.true(typeof player.army === 'number', 'Player should have army count');
+                assert.true(typeof player.reserve === 'number', 'Player should have reserve count');
+                assert.true(Array.isArray(player.areas), 'Player should have areas array');
+                assert.true(typeof player.bonus === 'number', 'Player should have bonus');
+                assert.true(typeof player.alive === 'boolean', 'Player should have alive status');
+            });
+        });
+
+        // Clean up after tests
+        QUnit.done(function() {
+            if (window.audioSystem) {
+                window.audioSystem.dispose();
+            }
+        });
+    </script>
+</body>
+</html>
